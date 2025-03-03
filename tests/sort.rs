@@ -9,8 +9,7 @@ use rand::{
 };
 use wgpu::util::DeviceExt;
 use wgpu_sort::{
-    utils::{download_buffer, guess_workgroup_size, upload_to_buffer},
-    GPUSorter, SortBuffers, HISTO_BLOCK_KVS,
+    utils::{download_buffer, guess_workgroup_size, upload_to_buffer}, Config, GPUSorter, SortBuffers, HISTO_BLOCK_KVS
 };
 
 
@@ -128,7 +127,7 @@ where
     let (device, queue) = setup().await;
     let subgroup_size = guess_workgroup_size(&device, &queue).await;
     assert_ne!(subgroup_size, None);
-    let sorter = GPUSorter::new(&device, subgroup_size.unwrap());
+    let sorter = GPUSorter::new(&device, subgroup_size.unwrap(), Config::default());
 
     let sort_buffers = sorter.create_sort_buffers(&device, NonZeroU32::new(n).unwrap());
     let n_sorted = sort_first_n.unwrap_or(sort_buffers.len());

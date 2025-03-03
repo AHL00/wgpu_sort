@@ -5,7 +5,7 @@ use std::{
 
 use wgpu::util::DeviceExt;
 
-use crate::GPUSorter;
+use crate::{Config, GPUSorter};
 
 #[doc(hidden)]
 /// only used for testing 
@@ -24,9 +24,6 @@ pub fn upload_to_buffer<T: bytemuck::Pod>(
     encoder.copy_buffer_to_buffer(&staging_buffer, 0, buffer, 0, staging_buffer.size());
 }
 
-#[doc(hidden)]
-/// only used for testing 
-/// temporally used for guessing subgroup size
 pub async fn download_buffer<T: Clone + bytemuck::Pod>(
     buffer: &wgpu::Buffer,
     device: &wgpu::Device,
@@ -83,7 +80,7 @@ async fn test_sort(sorter: &GPUSorter, device: &wgpu::Device, queue: &wgpu::Queu
         &sort_buffers.keys(),
         device,
         queue,
-        0..sort_buffers.keys_valid_size(),
+        0..sort_buffers.keys_valid_size(Config::default()),
     )
     .await;
     return sorted.into_iter().zip(sorted_data.into_iter()).all(|(a,b)|a==b);
@@ -100,7 +97,7 @@ pub async fn guess_workgroup_size(device: &wgpu::Device, queue: &wgpu::Queue) ->
     for subgroup_size in [1, 8, 16, 32, 64, 128] {
         log::debug!("Checking sorting with subgroupsize {}", subgroup_size);
 
-        cur_sorter = GPUSorter::new(device, subgroup_size);
+        cur_sorter = GPUSorter::new(device, subgroup_size, Config::default());
         let sort_success = test_sort(&cur_sorter, device, queue).await;
 
         log::debug!("{} worked: {}", subgroup_size, sort_success);

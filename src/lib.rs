@@ -66,18 +66,76 @@ pub struct GPUSorter {
     prefix_p: wgpu::ComputePipeline,
     scatter_even_p: wgpu::ComputePipeline,
     scatter_odd_p: wgpu::ComputePipeline,
+    config: Config,
+    subgroup_size: u32,
+}
+
+
+// /// number of passed used for sorting
+// /// we sort 8 bits per pass so 4 passes are required for a 32 bit value
+// const NUM_PASSES: u32 = BYTES_PER_PAYLOAD_ELEM;
+#[derive(Debug, Copy, Clone)]
+pub struct Config {
+    histogram_wg_size: u32,
+    pub prefix_wg_size: u32,
+    pub scatter_wg_size: u32,
+    rs_radix_log2: u32,
+    rs_radix_size: u32,
+    rs_keyval_size: u32,
+    rs_histogram_block_rows: u32,
+    rs_scatter_block_rows: u32,
+    scatter_block_kvs: u32,
+    histo_block_kvs: u32,
+    bytes_per_payload_elem: u32,
+    num_passes: u32,
+}
+
+impl Config {
+    pub fn set_histogram_wg_size(&mut self, histogram_wg_size: u32) {
+        self.histogram_wg_size = histogram_wg_size;
+        self.scatter_block_kvs = histogram_wg_size * self.rs_scatter_block_rows;
+        self.histo_block_kvs = histogram_wg_size * self.rs_histogram_block_rows;
+    }
+    pub fn set_radix_log2(&mut self, rs_radix_log2: u32) {
+        self.rs_radix_log2 = rs_radix_log2;
+        self.rs_radix_size = 1 << rs_radix_log2;
+        self.rs_keyval_size = 32 / rs_radix_log2;
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            histogram_wg_size: HISTOGRAM_WG_SIZE,
+            prefix_wg_size: PREFIX_WG_SIZE,
+            scatter_wg_size: SCATTER_WG_SIZE,
+            rs_radix_log2: RS_RADIX_LOG2,
+            rs_radix_size: RS_RADIX_SIZE,
+            rs_keyval_size: RS_KEYVAL_SIZE,
+            rs_histogram_block_rows: RS_HISTOGRAM_BLOCK_ROWS,
+            rs_scatter_block_rows: RS_SCATTER_BLOCK_ROWS,
+            scatter_block_kvs: SCATTER_BLOCK_KVS,
+            histo_block_kvs: HISTO_BLOCK_KVS,
+            bytes_per_payload_elem: BYTES_PER_PAYLOAD_ELEM,
+            num_passes: NUM_PASSES,
+        }
+    }
 }
 
 impl GPUSorter {
-    pub fn new(device: &wgpu::Device, subgroup_size: u32) -> Self {
+    pub fn reconfigure(&mut self, device: &wgpu::Device, config: Config) {
+        *self = Self::new(device, self.subgroup_size, config);
+    }
+
+    pub fn new(device: &wgpu::Device, subgroup_size: u32, config: Config) -> Self {
         // special variables for scatter shade
         let histogram_sg_size = subgroup_size;
-        let rs_sweep_0_size = RS_RADIX_SIZE / histogram_sg_size;
+        let rs_sweep_0_size = config.rs_radix_size / histogram_sg_size;
         let rs_sweep_1_size = rs_sweep_0_size / histogram_sg_size;
         let rs_sweep_2_size = rs_sweep_1_size / histogram_sg_size;
         let rs_sweep_size = rs_sweep_0_size + rs_sweep_1_size + rs_sweep_2_size;
-        let _rs_smem_phase_1 = RS_RADIX_SIZE + RS_RADIX_SIZE + rs_sweep_size;
-        let rs_smem_phase_2 = RS_RADIX_SIZE + RS_SCATTER_BLOCK_ROWS * SCATTER_WG_SIZE;
+        let _rs_smem_phase_1 = config.rs_radix_size + config.rs_radix_size + rs_sweep_size;
+        let rs_smem_phase_2 = config.rs_radix_size + config.rs_scatter_block_rows * config.scatter_wg_size;
         // rs_smem_phase_2 will always be larger, so always use phase2
         let rs_mem_dwords = rs_smem_phase_2;
         let rs_mem_sweep_0_offset = 0;
@@ -109,12 +167,12 @@ impl GPUSorter {
             const rs_mem_sweep_1_offset: u32 = {:}u;\n\
             const rs_mem_sweep_2_offset: u32 = {:}u;\n{:}",
             histogram_sg_size,
-            HISTOGRAM_WG_SIZE,
-            RS_RADIX_LOG2,
-            RS_RADIX_SIZE,
-            RS_KEYVAL_SIZE,
-            RS_HISTOGRAM_BLOCK_ROWS,
-            RS_SCATTER_BLOCK_ROWS,
+            config.histogram_wg_size,
+            config.rs_radix_log2,
+            config.rs_radix_size,
+            config.rs_keyval_size,
+            config.rs_histogram_block_rows,
+            config.rs_scatter_block_rows,
             rs_mem_dwords,
             rs_mem_sweep_0_offset,
             rs_mem_sweep_1_offset,
@@ -124,10 +182,10 @@ impl GPUSorter {
         let shader_code = shader_w_const
             .replace(
                 "{histogram_wg_size}",
-                HISTOGRAM_WG_SIZE.to_string().as_str(),
+                config.histogram_wg_size.to_string().as_str(),
             )
-            .replace("{prefix_wg_size}", PREFIX_WG_SIZE.to_string().as_str())
-            .replace("{scatter_wg_size}", SCATTER_WG_SIZE.to_string().as_str());
+            .replace("{prefix_wg_size}", config.prefix_wg_size.to_string().as_str())
+            .replace("{scatter_wg_size}", config.scatter_wg_size.to_string().as_str());
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Radix sort shader"),
@@ -175,6 +233,8 @@ impl GPUSorter {
             prefix_p,
             scatter_even_p,
             scatter_odd_p,
+            config,
+            subgroup_size
         };
     }
 
@@ -251,14 +311,15 @@ impl GPUSorter {
     fn create_keyval_buffers(
         device: &wgpu::Device,
         length: u32,
+        config: Config,
     ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
         // add padding so that our buffer size is a multiple of keys_per_workgroup
-        let count_ru_histo = keys_buffer_size(length) * RS_KEYVAL_SIZE;
+        let count_ru_histo = keys_buffer_size(length, config) * config.rs_keyval_size;
 
         // creating the two needed buffers for sorting
         let keys = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("radix sort keys buffer"),
-            size: (count_ru_histo * BYTES_PER_PAYLOAD_ELEM) as u64,
+            size: (count_ru_histo * config.bytes_per_payload_elem) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -268,12 +329,12 @@ impl GPUSorter {
         // auxiliary buffer for keys
         let keys_aux = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("radix sort keys auxiliary buffer"),
-            size: (count_ru_histo * BYTES_PER_PAYLOAD_ELEM) as u64,
+            size: (count_ru_histo * config.bytes_per_payload_elem) as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
-        let payload_size = length * BYTES_PER_PAYLOAD_ELEM; // make sure that we have at least 1 byte of data;
+        let payload_size = length * config.bytes_per_payload_elem; // make sure that we have at least 1 byte of data;
         let payload = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("radix sort payload buffer"),
             size: payload_size as u64,
@@ -307,11 +368,11 @@ impl GPUSorter {
         //   | workgroup_ids[keyval_size]      |
         //   +---------------------------------+ <-- (keyval_size + scatter_blocks_ru - 1) * histo_size + workgroup_ids_size
 
-        let scatter_blocks_ru = scatter_blocks_ru(length);
+        let scatter_blocks_ru = scatter_blocks_ru(length, self.config);
 
-        let histo_size = RS_RADIX_SIZE * std::mem::size_of::<u32>() as u32;
+        let histo_size = self.config.rs_radix_size * std::mem::size_of::<u32>() as u32;
 
-        let internal_size = (RS_KEYVAL_SIZE + scatter_blocks_ru) * histo_size; // +1 safety
+        let internal_size = (self.config.rs_keyval_size + scatter_blocks_ru) * histo_size; // +1 safety
 
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Internal radix sort buffer"),
@@ -322,10 +383,10 @@ impl GPUSorter {
         return buffer;
     }
 
-    fn general_info_data(length: u32) -> SorterState {
+    fn general_info_data(length: u32, config: Config) -> SorterState {
         SorterState {
             num_keys: length,
-            padded_size: keys_buffer_size(length),
+            padded_size: keys_buffer_size(length, config),
             even_pass: 0,
             odd_pass: 0,
         }
@@ -338,7 +399,7 @@ impl GPUSorter {
         encoder: &mut wgpu::CommandEncoder,
     ) {
         // as we only deal with 32 bit float values always 4 passes are conducted
-        let hist_blocks_ru = histo_blocks_ru(length);
+        let hist_blocks_ru = histo_blocks_ru(length, self.config);
 
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -405,7 +466,7 @@ impl GPUSorter {
 
         pass.set_pipeline(&self.prefix_p);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(NUM_PASSES as u32, 1, 1);
+        pass.dispatch_workgroups(self.config.num_passes as u32, 1, 1);
     }
 
     fn record_scatter_keys(
@@ -413,8 +474,9 @@ impl GPUSorter {
         bind_group: &wgpu::BindGroup,
         length: u32,
         encoder: &mut wgpu::CommandEncoder,
+        config: Config,
     ) {
-        let scatter_blocks_ru = scatter_blocks_ru(length);
+        let scatter_blocks_ru = scatter_blocks_ru(length, config);
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Scatter keyvals"),
@@ -476,7 +538,7 @@ impl GPUSorter {
 
         self.record_calculate_histogram(bind_group, num_elements, encoder);
         self.record_prefix_histogram(bind_group, encoder);
-        self.record_scatter_keys(bind_group, num_elements, encoder);
+        self.record_scatter_keys(bind_group, num_elements, encoder, self.config);
     }
 
     /// Initiates sorting with an indirect call.
@@ -505,14 +567,14 @@ impl GPUSorter {
     }
 
     /// creates all buffers necessary for sorting
-    pub fn create_sort_buffers(&self, device: &wgpu::Device, length: NonZeroU32) -> SortBuffers {
+    pub fn create_sort_buffers(&self, device: &wgpu::Device, length: NonZeroU32)-> SortBuffers {
         let length = length.get();
 
         let (keys_a, keys_b, payload_a, payload_b) =
-            GPUSorter::create_keyval_buffers(&device, length);
+            GPUSorter::create_keyval_buffers(&device, length, self.config);
         let internal_mem_buffer = self.create_internal_mem_buffer(&device, length);
 
-        let uniform_infos = Self::general_info_data(length);
+        let uniform_infos = Self::general_info_data(length, self.config);
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("radix sort uniform buffer"),
             contents: bytemuck::bytes_of(&uniform_infos),
@@ -618,8 +680,8 @@ impl SortBuffers {
 
     /// The keys buffer has padding bytes.
     /// This function returns the number of bytes without padding
-    pub fn keys_valid_size(&self) -> u64 {
-        (self.len() * RS_KEYVAL_SIZE) as u64
+    pub fn keys_valid_size(&self, config: Config) -> u64 {
+        (self.len() * config.rs_keyval_size) as u64
     }
 
     /// Buffer containing the values
@@ -633,16 +695,16 @@ impl SortBuffers {
     }
 }
 
-fn scatter_blocks_ru(n: u32) -> u32 {
-    (n + SCATTER_BLOCK_KVS - 1) / SCATTER_BLOCK_KVS
+fn scatter_blocks_ru(n: u32, config: Config) -> u32 {
+    (n + config.scatter_block_kvs - 1) / config.scatter_block_kvs
 }
 
 /// number of histogram blocks required
-fn histo_blocks_ru(n: u32) -> u32 {
-    (scatter_blocks_ru(n) * SCATTER_BLOCK_KVS + HISTO_BLOCK_KVS - 1) / HISTO_BLOCK_KVS
+fn histo_blocks_ru(n: u32, config: Config) -> u32 {
+    (scatter_blocks_ru(n, config) * config.scatter_block_kvs + config.histo_block_kvs - 1) / config.histo_block_kvs
 }
 
 /// keys buffer must be multiple of HISTO_BLOCK_KVS
-fn keys_buffer_size(n: u32) -> u32 {
-    histo_blocks_ru(n) * HISTO_BLOCK_KVS
+fn keys_buffer_size(n: u32, config: Config) -> u32 {
+    histo_blocks_ru(n, config) * config.histo_block_kvs
 }
