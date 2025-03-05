@@ -195,36 +195,41 @@ impl GPUSorter {
             label: Some("Zero the histograms"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "zero_histograms",
+            entry_point: Some("zero_histograms"),
             compilation_options: Default::default(),
+            cache: None
         });
         let histogram_p = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("calculate_histogram"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "calculate_histogram",
+            entry_point: Some("calculate_histogram"),
             compilation_options: Default::default(),
+            cache: None
         });
         let prefix_p = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("prefix_histogram"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "prefix_histogram",
+            entry_point: Some("prefix_histogram"),
             compilation_options: Default::default(),
+            cache: None
         });
         let scatter_even_p = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("scatter_even"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "scatter_even",
+            entry_point: Some("scatter_even"),
             compilation_options: Default::default(),
+            cache: None
         });
         let scatter_odd_p = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("scatter_odd"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "scatter_odd",
+            entry_point: Some("scatter_odd"),
             compilation_options: Default::default(),
+            cache: None
         });
 
         return Self {
@@ -465,7 +470,7 @@ impl GPUSorter {
         });
 
         pass.set_pipeline(&self.prefix_p);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.dispatch_workgroups(self.config.num_passes as u32, 1, 1);
     }
 
